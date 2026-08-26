@@ -1,0 +1,60 @@
+# =============================================================================
+# Aperture — local infrastructure
+# -----------------------------------------------------------------------------
+# Day 1 scope: PostgreSQL only (the sample-shop application database).
+#
+# Services that belong to later milestones are intentionally NOT declared yet,
+# so that `docker compose up` never starts a container that nothing talks to:
+#   - clickhouse        (Week 1 Day 6 — span storage)
+#   - collector         (Week 1 Day 5 — Go OTLP ingest)
+#   - shadow-postgres   (Week 3 Day 15 — verification sandbox)
+# =============================================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: aperture-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-shop}
+      POSTGRES_USER: ${POSTGRES_USER:-shop}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-shop_local_dev_password}
+      # Deterministic collation/encoding so EXPLAIN plans and index behaviour
+      # are reproducible across machines.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    command:
+      - postgres
+      # pg_stat_statements is required by the plan-based detectors (Week 3):
+      # it must be preloaded at server start, so it is configured here rather
+      # than being bolted on later.
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - pg_stat_statements.max=10000
+      # The benchmark drives high concurrency; the default 100 is too low to
+      # study pool saturation without the *server* becoming the bottleneck.
+      - -c
+      - max_connections=300
+      # Planner realism: keep the defaults honest rather than tuned, so that a
+      # missing index actually shows up as a Seq Scan.
+      - -c
+      - track_io_timing=on
+      - -c
+      - log_min_duration_statement=2000
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-shop} -d ${POSTGRES_DB:-shop}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+volumes:
+  postgres-data:
+    name: aperture-postgres-data

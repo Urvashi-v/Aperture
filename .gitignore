@@ -1,0 +1,48 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ---- Environment / secrets ----
+.env
+.env.*
+!.env.example
+
+# ---- Local infrastructure state ----
+.docker-data/
+pgdata/
+clickhouse-data/
+
+# ---- Go (collector, from Week 1 Day 5) ----
+collector/bin/
+collector/aperture-collector
+collector/aperture-collector.exe
+
+# ---- Node (only used for k6/dashboard tooling, no bundler) ----
+node_modules/
+
+# ---- Editors / OS ----
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ---- Generated evaluation output ----
+eval/output/
+loadtest/output/
+sdk/benchmarks/output/

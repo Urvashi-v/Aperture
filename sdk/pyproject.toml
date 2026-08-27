@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aperture-sdk"
+version = "0.1.0"
+description = "Bounded, fail-open OpenTelemetry instrumentation for ASGI + SQLAlchemy applications"
+requires-python = ">=3.11"
+
+# Deliberately tiny. This package gets installed *into someone else's
+# application*, so every dependency it drags in is a constraint imposed on a
+# host it does not own.
+#
+# Notably absent: opentelemetry-sdk. We use the official protobuf definitions
+# for wire compatibility, but the SDK's batching, queueing and sampling are the
+# parts design constraints C1/C3 require us to control ourselves - a bounded
+# ring buffer that drops and counts rather than an unbounded queue.
+dependencies = [
+    "opentelemetry-proto>=1.27",  # official OTLP protobuf schema - wire compat
+    "grpcio>=1.60",               # OTLP/gRPC transport (DESIGN.md 5.1)
+]
+
+[project.optional-dependencies]
+# Instrumentation targets. Each hook imports its library lazily and no-ops if
+# it is absent, so none of these is required to install or use the SDK.
+sqlalchemy = ["sqlalchemy>=2.0"]
+httpx = ["httpx>=0.27"]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",
+    "sqlalchemy[asyncio]>=2.0.30",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["aperture*"]

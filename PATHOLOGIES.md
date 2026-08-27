@@ -41,7 +41,7 @@ application code is making a real claim.
 | P2 | N+1 on review authors | `GET /api/products/{id}` | D1 structural | **PLANTED** |
 | P3 | Missing index on `orders.user_id` | `GET /api/users/{id}/orders` | D2 plan-based | **PLANTED** |
 | P4 | Missing composite index on `posts` | `GET /api/feed` | D2 plan-based | **PLANTED** |
-| P5 | Connection pool saturation | all endpoints under load | D3 pool | PENDING — Week 1 Day 7 |
+| P5 | Connection pool saturation | all endpoints under load | D3 pool | PENDING — wait time now measured, needs load |
 | P6 | Three serial external calls | `POST /api/checkout` | D4 serial I/O | PENDING — needs partner services |
 | P7 | Unbounded result set | `GET /api/admin/export` | D2/D6 row-count | **PLANTED** |
 | P8 | Chatty service fan-out | `GET /api/dashboard` | D1 generalised to HTTP | PENDING — endpoint not built |
@@ -274,11 +274,20 @@ against `DB_POOL_SIZE=5`. Requests then spend most of their time waiting for a
 connection while PostgreSQL itself sits idle — the case D3 exists to
 distinguish from "the database is slow".
 
-**What is missing today.** D3 needs `pool_wait_ns` measured separately from
-query execution time, which is SDK work (Week 1 Day 3, `Pool.checkout` /
-`checkin` events). Without that measurement there is nothing to detect, so the
-pathology is not claimed as planted. `max_connections=300` is already set on
-the PostgreSQL container so the server is not the bottleneck when this runs.
+**What changed on Day 2.** The measurement now exists. The SDK records
+`pool_wait_ns` per span, separately from execution time, and sums it onto the
+request span; `Pool.checkout`/`checkin` give the hold time that the Little's
+Law recommendation needs. Verified against real contention: two concurrent
+requests against a one-connection pool produced a measured wait of **>100 ms**
+on the loser, and the wait is attributed once per checkout rather than once per
+query, so summing across spans gives the true total.
+
+**What is still missing.** The load generator. Creating the pathology means
+running at concurrency ~50 against `DB_POOL_SIZE=5`, which is k6 work (Week 4
+Day 25, and exercised at the Day 7 overhead milestone). `max_connections=300`
+is already set on the PostgreSQL container so the server is not the bottleneck
+when that runs. Until then the input to D3 is instrumented but the condition
+has never been provoked, so the pathology is not claimed as planted.
 
 **Expected fix.** Little's Law: `required_pool ≈ arrival_rate × mean_hold_time`.
 

@@ -782,3 +782,72 @@ on one endpoint, which would break attribution in the evaluation. See
 Not in the v1.0 sketch. A product catalogue without categories is not a
 believable catalogue, and the category filter is one of the control endpoints'
 indexed read paths.
+
+### 15.4 The SDK does not memoise code locations by fingerprint
+
+**v1.0 said** (§7.3): stack capture is expensive, so capture the call site once
+per fingerprint and reuse it.
+
+**We capture on every query**, with the memo available behind
+`APERTURE_CODE_LOCATION_CACHE=true`.
+
+**Why:** the premise does not hold for this implementation. §7.3's advice is
+about `traceback.extract_stack`, which reads source files off disk. The SDK
+walks frames directly, reading only `co_filename` and `f_lineno` — measured at
+**1.4 µs against a 2.2 ms query, 0.06%**.
+
+What the memo costs is correctness on the flagship case. Two call sites issuing
+byte-identical SQL share one entry, so the second inherits the first's
+location. In sample-shop the auth dependency and the product-page N+1 both run
+`SELECT ... FROM users WHERE id = $1`; with the memo on, the N+1 finding names
+the auth dependency. §6.2's promised output is `site: app/routers/feed.py:88`,
+and a wrong file there is worse than no file.
+
+### 15.5 Span timestamps come from the monotonic clock
+
+**Not addressed in v1.0.** On Windows `time.time_ns()` has 15.625 ms
+resolution — measured here, 20,000 consecutive calls returned two distinct
+values.
+
+§6.2's non-overlap guard and all of §6.5 are statements about whether spans
+overlap in time. At 15 ms granularity, twenty sibling queries of 2 ms each
+carry identical timestamps, and an N+1 becomes indistinguishable from a
+deliberate `asyncio.gather` fan-out — the single confusion that would turn the
+flagship detector into a coin flip.
+
+Span times are derived from `perf_counter_ns` against one wall-clock anchor.
+Absolute times then drift from the system clock at whatever rate the two
+oscillators differ; ordering and durations *within* a trace are exact. Trace
+analysis only asks the second kind of question.
+
+### 15.6 Fingerprints are 63-bit
+
+**Not addressed in v1.0**, which specifies `xxhash64` and a `UInt64` column.
+
+OTLP carries integer attributes in a protobuf `int64`, which is signed, and
+protobuf raises while serialising an out-of-range value — taking the whole
+batch with it, not just the offending span. Found by pointing the SDK at a real
+OTLP receiver: 90 of 200 sample fingerprints were out of range.
+
+Masking to 63 bits yields a value that is simultaneously a valid positive
+`int64` and a valid ClickHouse `UInt64`, so no layer has to reinterpret
+two's-complement bit patterns. The cost is one bit of hash space: the birthday
+bound moves to roughly 3 billion distinct fingerprints, against the thousands
+this system will see. §5.2's `UInt64` column is unchanged and still correct.
+
+### 15.7 The SDK does not depend on `opentelemetry-sdk`
+
+**v1.0 said** (§5.1): use OTLP over gRPC, and do not reinvent tracing.
+
+**We use** `opentelemetry-proto` — the official protobuf schema, so the wire
+format is genuinely OTLP and a stock OTel collector can read it — but implement
+the span model, buffering and export ourselves.
+
+**Why:** the parts of `opentelemetry-sdk` we would be adopting are exactly the
+parts constraints C1 and C3 are about. `BatchSpanProcessor` uses an unbounded
+queue with a blocking fallback; C3 requires a fixed ring that drops and
+increments a counter. The SDK is also installed into somebody else's
+application, where every transitive dependency is a constraint imposed on a
+host we do not own.
+
+The spirit of §5.1 is "do not invent a wire format", and we have not.

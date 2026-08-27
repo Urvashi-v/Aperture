@@ -150,7 +150,41 @@ def create_app() -> FastAPI:
     app.include_router(checkout.router)
     app.include_router(admin.router)
 
+    _install_aperture(app)
+
     return app
+
+
+def _install_aperture(app: FastAPI) -> None:
+    """Attach the Aperture SDK, if it is installed and enabled.
+
+    This is the entire integration surface, and it is deliberately the last
+    thing `create_app` does so that Aperture's middleware ends up outermost and
+    therefore measures the whole request rather than a slice of it.
+
+    Three things are worth noticing about what is NOT here: the engine is not
+    passed in, no session or repository is wrapped, and no router is touched.
+    Queries, connection-pool waits and outbound HTTP are picked up by
+    class-level hooks the SDK installs on SQLAlchemy and httpx (design
+    constraint C2, zero application code changes beyond one middleware).
+
+    Both failure modes are non-events. If the SDK is not installed, the import
+    fails and the application runs uninstrumented. If it is installed but
+    `APERTURE_SDK_ENABLED` is not true, `instrument_app` returns without adding
+    any middleware at all.
+    """
+    try:
+        from aperture import instrument_app
+    except ImportError:
+        logger.debug("aperture SDK not installed; running uninstrumented")
+        return
+
+    try:
+        instrument_app(app, service_name="sample-shop", service_version=__version__)
+    except Exception:
+        # An instrumentation library must never be the reason an application
+        # fails to boot.
+        logger.warning("aperture instrumentation failed to install", exc_info=True)
 
 
 app = create_app()

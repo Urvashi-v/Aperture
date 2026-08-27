@@ -1,17 +1,21 @@
 # Results
 
-**Nothing in this file is measured yet, because the thing that would be
-measured does not exist yet.**
+**No detection results exist, because no detector exists.**
 
-The analysis engine, the SDK, and the collector are all unbuilt as of Day 1.
-There are therefore no detection results, no overhead numbers, and no
-verification outcomes. This file exists now so that the shape of the experiment
-is fixed *before* any detector is written — deciding what counts as success
-after seeing the results is how evaluations become worthless.
+As of Day 2 the benchmark application and the instrumentation SDK are working;
+the collector, the analysis engine and the dashboard are unbuilt. There are
+therefore no recall or precision figures, no verification outcomes, and no
+validated overhead number.
 
-Every number below is marked `UNMEASURED` and will be replaced by output from
-`eval/run_evaluation.py`. No value in this file, in `README.md`, or in any
-dashboard will ever be typed in by hand.
+The headline tables stay marked `UNMEASURED` and will be written by
+`eval/run_evaluation.py`. They are fixed in shape *before* any detector is
+written, because deciding what counts as success after seeing the results is
+how evaluations become worthless. No value in this file, in `README.md`, or in
+any dashboard will ever be typed in by hand.
+
+Below the tables is a record of what *has* actually been measured on this
+machine. Those are evidence that the planted pathologies and the trace pipeline
+are real — they are not results, and each says so.
 
 ---
 
@@ -39,12 +43,19 @@ dashboard will ever be typed in by hand.
 
 | Metric | Constraint | Measured |
 |---|---|---|
-| SDK added p99 latency | < 1 ms (C1) | UNMEASURED |
+| SDK added p99 latency | < 1 ms (C1) | **UNMEASURED** (see note) |
 | SDK CPU overhead | < 2% (C1) | UNMEASURED |
 | SDK steady-state RSS | bounded (C3) | UNMEASURED |
 | Ingest throughput | — | UNMEASURED |
 | Analysis latency over a 1-hour window | — | UNMEASURED |
 | Storage bytes per span after compression | — | UNMEASURED |
+
+**Note on C1.** A preliminary in-process figure exists and is reported below,
+but it is not a validation of C1 and must not be quoted as one. C1 is a claim
+about a service under concurrent load measured from outside the process; the
+Week 1 Day 7 milestone measures that with k6, and it has not been run. The
+preliminary figure is **over budget**, which is a reason to investigate on
+Day 7, not a result.
 
 ---
 
@@ -95,10 +106,75 @@ issues one author lookup per review rendered.
 slower than its control, P2 2.6×, P3 2.5×, P4 2.2×. Full table in
 PATHOLOGIES.md.
 
-**Test suite.** 105 tests, all passing, ~4 s, against a real PostgreSQL.
+**Test suite.** 276 tests, all passing, ~33 s. Against a real PostgreSQL, a
+real OTLP/gRPC server, real sockets, and real connection-pool contention.
 
 **Smoke test.** 27/27 endpoint checks passing against a running server, at both
-`small` and `medium`.
+`small` and `medium`, and again with the SDK enabled.
+
+---
+
+## Day 2 — the instrumentation SDK
+
+Also real numbers from this machine, and also not results.
+
+**End-to-end export.** With the SDK enabled and a real OTLP/gRPC receiver
+listening, a 27-check smoke run produced **115 spans started, 115 finished, 115
+buffered, 115 exported**; 0 export failures, 0 dropped for any reason, buffer
+peak 31 of 8192.
+
+**Fail-open, verified.** With nothing listening on the collector endpoint, all
+27 smoke checks still pass and every span that did not make it out is accounted
+for in `spans_dropped_export_failure`.
+
+**Trace shape.** `GET /api/orders?limit=6` yields 9 spans: one SERVER, one auth
+lookup, one orders query, and **six sibling DB spans sharing one fingerprint,
+non-overlapping, one row each, from a single call site**
+(`shop/routers/orders.py:95`). That is planted pathology P1 with every clause of
+the DESIGN.md §6.2 signature present, which is the precondition detector D1
+needs.
+
+**SDK primitives** (micro-benchmark, in-process, idle machine):
+
+| Operation | Cost |
+|---|---:|
+| span start + end, including buffer put | ~3.8 µs |
+| buffer put | ~0.9 µs |
+| placeholder fingerprint | ~1.4 µs |
+| code-location capture | ~1.4 µs |
+
+**Preliminary end-to-end overhead — NOT a C1 validation.** On
+`GET /api/orders?limit=10` (about 13 queries, 15 spans per request), 5
+interleaved rounds of 120 requests each:
+
+```
+baseline      p50 38.566 ms   p95 51.549 ms   p99 64.784 ms
+instrumented  p50 41.299 ms   p95 54.727 ms   p99 72.659 ms
+delta         p50 +2.733 ms (+7.1%)
+noise floor   0.680 ms
+```
+
+The delta is outside the run's own noise floor, so it is real for this
+workload on this machine — and it is well over the C1 budget. The per-primitive
+costs above sum to roughly 100 µs per request, not 2.7 ms, so most of the cost
+is somewhere the micro-benchmark does not look. Finding it is Day 7's job.
+
+**Two bugs this measurement work found**, both recorded because they are the
+kind that stay found only if written down:
+
+1. **`time.time_ns()` has 15.625 ms resolution on Windows** — 20,000
+   consecutive calls returned two distinct values. Span timestamps had to move
+   to the monotonic clock, or every N+1 would have been indistinguishable from
+   a concurrent fan-out.
+2. **Fingerprints overflowed protobuf's signed `int64`** — 90 of 200 samples,
+   and protobuf's failure took the entire export batch rather than the one
+   span. Only visible against a real OTLP receiver.
+
+**One non-bug worth recording:** an earlier version of the benchmark reported
++8.9 ms at p50, and two changes were investigated on the strength of it. A
+properly interleaved re-run showed the delta was machine drift. The benchmark
+now interleaves and computes its own noise floor, and says so when a result
+falls inside it.
 
 ---
 

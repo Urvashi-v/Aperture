@@ -14,11 +14,10 @@ Full architecture and algorithms: [`DESIGN.md`](DESIGN.md).
 
 ## Status
 
-**Day 1 of 28. Foundation only.**
+**Day 2 of 28. Benchmark application and instrumentation SDK.**
 
-This repository currently contains the benchmark application the detectors will
-be pointed at, and nothing else. The SDK, the collector, the analysis engine
-and the dashboard are all unwritten.
+The application is instrumented and producing real OpenTelemetry traces. The
+collector, the analysis engine and the dashboard are still unwritten.
 
 | Component | Status |
 |---|---|
@@ -26,15 +25,17 @@ and the dashboard are all unwritten.
 | PostgreSQL infrastructure (Docker Compose) | **Working** |
 | Planted pathologies P1–P4, P7 | **Planted and verified** |
 | Planted pathologies P5, P6, P8 | Pending — see [`PATHOLOGIES.md`](PATHOLOGIES.md) |
-| `sdk/` — instrumentation | Not started (Week 1, Days 2–4) |
+| `sdk/` — instrumentation | **Working** (Week 1, Days 2–4) |
 | `collector/` — Go OTLP ingest | Not started (Week 1, Day 5) |
 | `analyzer/` — detectors, ranker, verifier | Not started (Weeks 2–3) |
 | `dashboard/` — findings UI | Not started (Week 4) |
 
-**There are no benchmark results yet, because there is nothing to benchmark.**
-[`RESULTS.md`](RESULTS.md) records every metric as `UNMEASURED` and will be
-written by `eval/run_evaluation.py` once it exists. No number in this
-repository is typed in by hand.
+**No detection results exist, because no detector exists.**
+[`RESULTS.md`](RESULTS.md) records every detection and overhead metric as
+`UNMEASURED`. In particular **the SDK's overhead has not been validated against
+constraint C1** — that is the Week 1 Day 7 milestone, and the preliminary
+in-process figure is currently over budget. No number in this repository is
+typed in by hand.
 
 ---
 
@@ -70,6 +71,49 @@ Alongside them are **15 control endpoints** that must stay healthy. A detector
 that flags everything has perfect recall and no value, so the controls are as
 load-bearing as the bugs.
 
+## Instrumentation
+
+The application is instrumented by exactly one call, at the end of the app
+factory in [`shop/main.py`](sample-shop/shop/main.py):
+
+```python
+from aperture import instrument_app
+instrument_app(app, service_name="sample-shop", service_version=__version__)
+```
+
+That is the entire integration surface — design constraint C2. The engine is
+never handed over, no session is wrapped, and no router is touched. SQL
+queries, connection-pool waits and outbound HTTP are captured by hooks the SDK
+installs on the SQLAlchemy and httpx *classes*.
+
+It is **off unless `APERTURE_SDK_ENABLED=true`**, and when off no middleware is
+added at all. Every test in this repository passes identically either way.
+
+A request to `GET /api/orders?limit=6` produces this, on the wire, in OTLP:
+
+```
+SERVER  GET /api/orders            57.9ms  endpoint=/api/orders  pool=52.2ms
+CLIENT  db.select                   5.5ms  rows=1   at=shop/dependencies.py:43
+CLIENT  db.select                   3.6ms  rows=6   at=shop/routers/orders.py:82
+CLIENT  db.select                   5.3ms  rows=1   at=shop/routers/orders.py:95
+CLIENT  db.select                   1.6ms  rows=1   at=shop/routers/orders.py:95
+CLIENT  db.select                   1.2ms  rows=1   at=shop/routers/orders.py:95
+CLIENT  db.select                   1.1ms  rows=1   at=shop/routers/orders.py:95
+CLIENT  db.select                   1.1ms  rows=1   at=shop/routers/orders.py:95
+CLIENT  db.select                   1.2ms  rows=1   at=shop/routers/orders.py:95
+```
+
+Six sibling spans sharing one SQL fingerprint, running sequentially, one row
+each, from one call site. That is planted pathology P1, and it is the exact
+shape detector D1 will look for. Details and the design decisions behind them
+are in [`sdk/README.md`](sdk/README.md).
+
+To watch it yourself without the collector (which arrives Day 5):
+
+```bash
+python scripts/dev_otlp_sink.py --tree --sql
+```
+
 ---
 
 ## Requirements
@@ -96,7 +140,7 @@ cp .env.example .env
 ```
 
 ```bash
-python -m venv .venv && ./.venv/Scripts/python.exe -m pip install -e "./sample-shop[dev]"
+python -m venv .venv && ./.venv/Scripts/python.exe -m pip install -e "./sample-shop[dev]" -e "./sdk[dev]"
 ```
 
 > On macOS or Linux the interpreter is `./.venv/bin/python` instead.
@@ -146,7 +190,25 @@ With the server running, hit every endpoint and check the status codes:
 ./scripts/smoke.sh
 ```
 
-Both currently pass in full: **105 tests** and **27/27 smoke checks**.
+Both currently pass in full: **276 tests** and **27/27 smoke checks**.
+
+The suite is not shy about what it talks to: real PostgreSQL, a real OTLP/gRPC
+server, real sockets for the outbound-HTTP hook, and real connection-pool
+contention for the pool-wait measurement. Two of the planted pathologies are
+properties of the PostgreSQL planner, and the SDK's job is to describe what
+actually happened, so substituting a fake for any of those would be testing
+something other than the system.
+
+To watch the instrumented application end to end, run the OTLP sink and the
+server together:
+
+```bash
+python scripts/dev_otlp_sink.py --tree
+```
+
+```bash
+APERTURE_SDK_ENABLED=true ./scripts/run_api.sh
+```
 
 ---
 
@@ -248,9 +310,14 @@ aperture/
 │       ├── dependencies.py
 │       ├── routers/           # health, catalog, users, orders, feed, checkout, admin
 │       └── seed/              # profiles, generators, COPY-based loader, CLI
-├── tests/                     # 105 tests against a real PostgreSQL
-├── scripts/                   # bootstrap, dev_up, migrate, seed, run_api, smoke
-├── sdk/                       # not started — see sdk/README.md
+├── tests/
+│   ├── sample_shop/           # 105 tests against a real PostgreSQL
+│   └── sdk/                   # 171 tests: real PG, real gRPC, real sockets
+├── scripts/                   # bootstrap, dev_up, migrate, seed, run_api, smoke,
+│                              # dev_otlp_sink
+├── sdk/                       # the instrumentation SDK  <- Day 2
+│   ├── aperture/              # middleware, context, spans, buffer, exporter, hooks
+│   └── benchmarks/            # overhead measurement (see its README)
 ├── collector/                 # not started
 ├── analyzer/                  # not started
 ├── dashboard/                 # not started
@@ -273,6 +340,15 @@ Every dependency is load-bearing. Nothing was added for cosmetics.
 | `alembic` | Schema migrations. The schema is an experimental control, so it must be versioned. | — |
 | `pydantic` / `pydantic-settings` | Request/response models; env configuration. Pydantic is already a FastAPI dependency. | — |
 | `pytest`, `pytest-asyncio`, `httpx` | Test suite and its ASGI transport | — |
+| `opentelemetry-proto` | The official OTLP protobuf schema, so spans are wire-compatible with any OTel collector | Hand-rolling the schema is the "reinvented tracing" mistake DESIGN.md §5.1 warns about |
+| `grpcio` | OTLP/gRPC transport | DESIGN.md §5.1 specifies gRPC |
+
+The SDK deliberately does **not** depend on `opentelemetry-sdk`. It is
+installed into somebody else's application, so every dependency it drags in is
+a constraint imposed on a host it does not own — and its batching, queueing and
+sampling are precisely the parts constraints C1 and C3 require us to control
+ourselves. A bounded ring that drops and counts is not what a stock
+`BatchSpanProcessor` gives you.
 
 Deliberately **not** added:
 
@@ -289,6 +365,10 @@ Deliberately **not** added:
 Later milestones will add `sqlglot` (AST-based SQL fingerprinting — see
 DESIGN.md §6.1 on why regex is not acceptable here), a ClickHouse client, and
 `scipy`/`ruptures` for the CUSUM detector.
+
+Also deliberately not added: **structlog/loguru** in the SDK (same reasoning as
+the application), and **jq** anywhere (`scripts/` use the venv's Python for
+JSON).
 
 ---
 
@@ -325,6 +405,16 @@ local database.
   ~13 ms there. Use `medium` or larger for anything that depends on them.
 - `X-User-Id` authentication is not security.
 - The seeder is destructive by design and has no incremental mode.
-- No load testing, no concurrency testing, and no latency measurement of any
-  kind has been done. Every timing in this repository is a single sample from
-  one laptop, presented as evidence of a query plan rather than as a benchmark.
+- **SDK overhead is not validated against constraint C1.** The preliminary
+  in-process figure is +2.7 ms at p50 on a 38.6 ms request, which is over
+  budget, and the per-primitive costs do not account for it. Day 7 is the
+  milestone that measures this properly; see
+  [`sdk/benchmarks/README.md`](sdk/benchmarks/README.md).
+- The SQL fingerprint and the HTTP URL template are both **placeholders**, and
+  every span says so in a `*_method` field. The real fingerprint is Week 2
+  Day 9.
+- The SDK has no span object pool yet (DESIGN.md §7.1.1); spans use `slots=True`
+  and nothing more.
+- No load testing and no concurrency testing has been done. Every timing in
+  this repository is from one laptop, presented as evidence of a query plan or
+  a trace shape rather than as a benchmark.
